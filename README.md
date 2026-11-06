@@ -15,6 +15,7 @@ cp .env.example .env
 set -a
 . ./.env
 set +a
+python -m radar.login
 radar
 ```
 
@@ -25,7 +26,7 @@ radar
 - `RADAR_DB`: caminho SQLite (padrão `data/radar.sqlite3`).
 - `TELEGRAM_SESSION`: caminho da sessão Telethon (padrão `data/telegram`).
 
-O primeiro `radar` solicita telefone, código e, quando configurada, senha 2FA da **conta leitora** no terminal. Não é a sessão do bot. Resolva esse login antes de executar como serviço. Inicie uma conversa com o bot por `/start` para permitir as notificações. Preserve o diretório `data/` entre reinícios e mantenha apenas uma instância do processo. Nunca versione `.env`, banco ou sessão.
+O comando `python -m radar.login` solicita telefone, código e, quando configurada, senha 2FA da **conta leitora** no terminal. O serviço `radar` exige sessão já autenticada e encerra com instrução de login quando ela estiver ausente ou expirada. Não é a sessão do bot. Resolva esse login antes de executar como serviço. Inicie uma conversa com o bot por `/start` para permitir as notificações. Preserve o diretório `data/` entre reinícios e mantenha apenas uma instância do processo. Nunca versione `.env`, banco ou sessão.
 
 ## Comandos
 
@@ -66,3 +67,7 @@ python -m pytest -q
 ```
 
 Cobrem autorização, cadastro sem importação implícita, preços, deduplicação, relatórios, notificações, intervalos ausentes, cancelamento e retomada do cursor após falha. Não exigem credenciais. A validação real com o Telegram depende da configuração da conta e dos canais.
+
+## Deploy automático na Oracle
+
+Veja [o guia de CI/CD](deploy/README.md) para configurar o GitHub Actions, os secrets SSH e o primeiro login na VPS. O deploy preserva banco e sessão, verifica a saúde do bot e tenta rollback da imagem em caso de falha.

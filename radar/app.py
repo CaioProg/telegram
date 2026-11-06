@@ -12,6 +12,7 @@ from telethon import TelegramClient, events
 
 from .core import DB, UTC, matches, money, now, parse_money, parse_offer, period_start
 from .worker import Worker, message_url
+from .health import HEARTBEAT
 
 PERIODS = [('7 dias', '7'), ('30 dias', '30'), ('90 dias', '90'), ('6 meses', '6m'), ('1 ano', '1y'), ('Personalizado', 'custom')]
 
@@ -164,7 +165,11 @@ async def run():
     app.add_handler(CallbackQueryHandler(controller.callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, controller.text))
     client = TelegramClient(session_path, int(os.environ['TELEGRAM_API_ID']), os.environ['TELEGRAM_API_HASH'], flood_sleep_threshold=0)
-    await client.start()  # Primeiro uso exige login interativo da conta leitora.
+    await client.connect()
+    if not await client.is_user_authorized():
+        await client.disconnect()
+        db.conn.close()
+        raise SystemExit('Sessão Telegram ausente ou expirada. Execute python -m radar.login antes de iniciar o serviço.')
     # Resolve todos os canais antes de instalar o handler; falha explícita se inacessível.
     entities = [await client.get_entity(channel) for channel in channels]
     channel_names = {entity.id: channel for entity, channel in zip(entities, channels)}
@@ -187,6 +192,14 @@ async def run():
             await app.updater.start_polling()
             worker = Worker(db, client, app.bot, admin, channels)
             tasks = [asyncio.create_task(worker.run()), asyncio.create_task(worker.deliver())]
+
+            async def heartbeat():
+                while True:
+                    if client.is_connected() and app.running and app.updater.running and all(not task.done() for task in tasks[:2]):
+                        HEARTBEAT.touch()
+                    await asyncio.sleep(10)
+
+            tasks.append(asyncio.create_task(heartbeat()))
             try:
                 await client.run_until_disconnected()
             finally:
@@ -196,6 +209,7 @@ async def run():
                 await app.updater.stop()
                 await app.stop()
     finally:
+        HEARTBEAT.unlink(missing_ok=True)
         await client.disconnect()
         db.conn.close()
 

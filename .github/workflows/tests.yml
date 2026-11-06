@@ -1,12 +1,82 @@
-name: Tests
-on: [push, pull_request]
+name: CI and deploy to Oracle
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: radar-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
+    name: Tests and container build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
       - run: pip install -e '.[test]'
       - run: python -m pytest -q
+      - run: bash -n deploy/remote.sh
+      - run: docker build -t radar-promocoes:ci .
+      - name: Validate Compose configuration
+        run: |
+          mkdir -p shared
+          touch shared/.env
+          docker compose config --quiet
+      - name: Container smoke test
+        run: docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges --entrypoint python radar-promocoes:ci -c "from radar.app import Bot; from radar.core import DB; from radar.health import HEARTBEAT, healthy; db = DB(':memory:'); assert len(db.products()) == 2; assert not healthy(); HEARTBEAT.touch(); assert healthy()"
+
+  deploy:
+    name: Deploy to Oracle VPS
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.ORACLE_DEPLOY_ENABLED == 'true'
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        env:
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+          ORACLE_KNOWN_HOSTS: ${{ secrets.ORACLE_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          for name in ORACLE_HOST ORACLE_USER ORACLE_SSH_KEY ORACLE_KNOWN_HOSTS; do
+            if [[ -z "${!name}" ]]; then echo "Missing secret: $name" >&2; exit 1; fi
+          done
+          [[ "$ORACLE_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || exit 1
+          [[ "$ORACLE_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || exit 1
+          install -d -m 700 ~/.ssh
+          umask 077
+          printf '%s\n' "$ORACLE_SSH_KEY" > ~/.ssh/oracle_vm
+          printf '%s\n' "$ORACLE_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Upload exact tested release
+        env:
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --output="$RUNNER_TEMP/$GITHUB_SHA.tar.gz" "$GITHUB_SHA"
+          ssh -i ~/.ssh/oracle_vm -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "$ORACLE_USER@$ORACLE_HOST" 'mkdir -p "$HOME/radar-promocoes"'
+          scp -i ~/.ssh/oracle_vm -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "$RUNNER_TEMP/$GITHUB_SHA.tar.gz" "$ORACLE_USER@$ORACLE_HOST:radar-promocoes/$GITHUB_SHA.tar.gz"
+      - name: Build, restart and verify health
+        env:
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+        run: |
+          ssh -i ~/.ssh/oracle_vm -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "$ORACLE_USER@$ORACLE_HOST" "bash -s -- '$GITHUB_SHA'" < deploy/remote.sh
+      - name: Remove SSH credentials
+        if: always()
+        run: rm -f ~/.ssh/oracle_vm ~/.ssh/known_hosts

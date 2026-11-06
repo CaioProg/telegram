@@ -1,0 +1,28 @@
+name: radar-promocoes
+services:
+  radar:
+    image: radar-promocoes:${RADAR_RELEASE:-local}
+    build: .
+    user: "${RADAR_UID:-1000}:${RADAR_GID:-1000}"
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${RADAR_SHARED_DIR:-./shared}/.env
+    environment:
+      RADAR_DB: /app/data/radar.sqlite3
+      TELEGRAM_SESSION: /app/data/telegram
+    volumes:
+      - ${RADAR_SHARED_DIR:-./shared}/data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
