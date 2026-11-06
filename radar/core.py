@@ -22,6 +22,22 @@ def matches(name, text):
     return bool(words) and re.search(r'\b' + r'\W+'.join(map(re.escape, words)) + r'\b', normalize(text)) is not None
 
 
+def search_term(name):
+    """One mandatory word, not a phrase: punctuation between words may vary.
+
+    Prefer the model word before a number (Edge in Edge 70 Pro). For names
+    without a model number, use the longest word. Non-ASCII names keep the
+    full-history path because Telegram's normalization may differ from ours.
+    """
+    if not name.isascii():
+        return ''
+    words = re.findall(r'\w+', name.lower())
+    for index, word in enumerate(words):
+        if index and word.isdigit() and words[index - 1].isalpha():
+            return words[index - 1]
+    return max((w for w in words if w.isalpha() and len(w) >= 3), key=len, default='')
+
+
 def parse_money(text):
     value = text.strip().replace('R$', '').strip()
     if not re.fullmatch(r'(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d{1,2})?', value):
@@ -88,6 +104,13 @@ class DB:
         CREATE TABLE IF NOT EXISTS outbox(
           id INTEGER PRIMARY KEY, text TEXT NOT NULL, sent INTEGER DEFAULT 0);
         ''')
+        # Additive migration: preserve existing offers and completed coverage.
+        columns = {row['name'] for row in self.conn.execute('PRAGMA table_info(scans)')}
+        for column, definition in [('search_query', 'TEXT'), ('examined', 'INTEGER NOT NULL DEFAULT 0'),
+                                   ('found', 'INTEGER NOT NULL DEFAULT 0'), ('last_date', 'INTEGER')]:
+            if column not in columns:
+                self.conn.execute(f'ALTER TABLE scans ADD COLUMN {column} {definition}')
+        self.conn.commit()
         if not self.conn.execute('SELECT 1 FROM products LIMIT 1').fetchone():
             for name in ('Motorola Edge 70 Pro', 'Motorola Signature'):
                 self.add(name)
@@ -190,6 +213,29 @@ class DB:
                 label = 'Novo menor preço observado nos canais' if minimum is None or price < minimum else 'Promoção encontrada'
                 self.conn.execute('INSERT INTO outbox(text) VALUES (?)', (f"{label}: {product['name']}\n{money(price)}\nLoja: {store or 'não informada'} | Cupom: {coupon or 'não informado'}\n{url}",))
         return inserted
+
+    def search_progress(self):
+        jobs = self.conn.execute('SELECT jobs.*, products.name FROM jobs JOIN products ON products.id=jobs.product ORDER BY jobs.id DESC LIMIT 10').fetchall()
+        lines = []
+        labels = {'pending': 'na fila', 'running': 'em andamento', 'done': 'concluída', 'cancelled': 'cancelada'}
+        for job in jobs:
+            scans = self.conn.execute('SELECT * FROM scans WHERE job=? ORDER BY id', (job['id'],)).fetchall()
+            channels = {s['channel'] for s in scans}
+            completed = sum(all(s['done'] for s in scans if s['channel'] == channel) for channel in channels)
+            start = datetime.fromtimestamp(job['start'], UTC).strftime('%d/%m/%Y')
+            end = datetime.fromtimestamp(job['end'], UTC).strftime('%d/%m/%Y')
+            lines.append(f"#{job['id']} {job['name']}: {labels.get(job['status'], job['status'])}\n"
+                         f"{start} a {end} UTC | Canais concluídos: {completed}/{len(channels)}\n"
+                         f"Mensagens candidatas examinadas: {sum(s['examined'] for s in scans)} | Ofertas novas: {sum(s['found'] for s in scans)}")
+            current = next((s for s in scans if not s['done']), None)
+            if current and job['status'] == 'running':
+                detail = f"Consultando @{current['channel']}"
+                if current['last_date']:
+                    detail += ' até ' + datetime.fromtimestamp(current['last_date'], UTC).strftime('%d/%m/%Y %H:%M UTC')
+                lines.append(detail)
+            if job['error']:
+                lines.append(job['error'])
+        return '\n\n'.join(lines) or 'Nenhuma busca.'
 
     def report(self, pid, start, end, channels):
         rows = self.conn.execute('SELECT * FROM offers WHERE product=? AND date>=? AND date<? ORDER BY date,message', (pid, start, end)).fetchall()

@@ -41,7 +41,7 @@ O comando `python -m radar.login` solicita telefone, código e, quando configura
 | `/adicionarcanal` | Username ou link público → validar acesso da conta leitora → ativar sem reiniciar |
 | `/removercanal` | Canal → confirmar; desativa monitoramento, cancela buscas pendentes desse canal e preserva histórico |
 | `/listarcanais` | Canais ativos cadastrados no SQLite |
-| `/buscas` | Estado das últimas dez importações |
+| `/buscas` | Últimas dez importações: fila, canais concluídos, canal atual, mensagens candidatas examinadas, ofertas novas e pausas do Telegram |
 | `/cancelar` | Encerra a conversa atual e cancela todas as importações pendentes/em andamento |
 
 Períodos: 7, 30, 90 dias, 6 meses, 1 ano e personalizado (`DD/MM/AAAA DD/MM/AAAA`, dia final incluído). Datas e relatórios em UTC. Não há importação automática na inicialização ou no cadastro. Novas consultas sempre pedem o período; somente tarefas previamente autorizadas e interrompidas são retomadas automaticamente.
@@ -57,7 +57,9 @@ Ao atualizar uma instalação antiga, os canais de `TELEGRAM_CHANNELS` são vali
 ## Persistência e execução
 
 - Alterações de produtos passam a valer na próxima mensagem, sem reiniciar.
-- Um trabalhador de importação percorre mensagens antigas, com pausas entre lotes. O monitoramento ao vivo usa um handler separado e não aguarda a importação.
+- Um trabalhador de importação usa a busca do Telegram por uma palavra obrigatória do nome (por exemplo, `edge` para Motorola Edge 70 Pro), e valida nome completo e preço localmente. Uma única palavra evita exigir uma frase exata na busca; a regra de reconhecimento do produto permanece igual. Nomes com caracteres não ASCII ou sem palavra adequada usam a leitura integral como alternativa. Há pausas entre lotes. O monitoramento ao vivo usa um handler separado e não aguarda a importação.
+- `/buscas` mostra progresso persistido por canal, mensagens candidatas examinadas, ofertas novas e a última data examinada. Não estima porcentagem nem tempo restante, pois o total de resultados é desconhecido. Durante `FloodWait`, mostra o horário previsto de retomada.
+- Ao atualizar da leitura integral para a busca, apenas os canais de tarefas ainda incompletos recomeçam do início do intervalo. Ofertas já salvas são deduplicadas e coberturas concluídas são preservadas.
 - Cursor persistido por canal/tarefa, inclusive para mensagens sem correspondência. Erros temporários geram nova tentativa após 30 segundos. `FloodWait` pausa somente a importação pelo tempo solicitado pelo Telegram.
 - As coberturas são registradas apenas ao concluir cada intervalo. Consultas reutilizam intervalos completos; ofertas possuem chave única por produto/canal/mensagem. Reinícios podem reler a última mensagem, mas não duplicam ofertas. Buscas sobrepostas pendentes podem reler mensagens de intervalos parcialmente cobertos; os dados continuam deduplicados.
 - Cancelamento é verificado a cada mensagem. Durante `FloodWait`, o estado é cancelado imediatamente no banco, e o trabalhador o observa ao retomar. Dados parciais permanecem consultáveis, com aviso de incompletude.
@@ -67,7 +69,7 @@ Sem alvo, cada nova oferta reconhecida gera notificação. Com alvo, notificamos
 
 ## Limites do MVP
 
-O menor valor é **observado nos canais configurados**, não o menor preço de todo o mercado. Histórico completo significa que os intervalos foram percorridos nos canais configurados; mensagens apagadas ou indisponíveis não podem ser recuperadas. Não há coleta automática de mensagens perdidas durante indisponibilidade: consulte explicitamente o período desejado.
+O menor valor é **observado nos canais configurados**, não o menor preço de todo o mercado. Histórico processado significa que a consulta dos intervalos terminou nos canais configurados. Na busca otimizada, a cobertura depende dos resultados indexados pelo Telegram; mensagens apagadas, indisponíveis ou ausentes do índice não podem ser recuperadas por essa busca. Não há coleta automática de mensagens perdidas durante indisponibilidade: consulte explicitamente o período desejado.
 
 O extrator exige o nome completo do produto e um preço com `R$`; reconhece `Loja:`/`Vendido por:` e `Cupom`. Assume o último valor em reais da mensagem como preço anunciado. Mensagens com parcelas, variantes ou múltiplos produtos podem exigir revisão e adaptação do extrator ao formato dos seus canais; não calcula descontos condicionais nem consulta páginas das lojas. Edições de mensagens não atualizam ofertas existentes. Canais privados não são suportados nesta versão.
 

@@ -41,8 +41,10 @@ class Bot:
             await self.send(update, 'Conversa e buscas pendentes canceladas. Ofertas já salvas foram preservadas.')
             return
         if command == 'buscas':
-            jobs = self.db.conn.execute('SELECT id,status,error FROM jobs ORDER BY id DESC LIMIT 10').fetchall()
-            await self.send(update, '\n'.join(f"#{j['id']}: {j['status']} {j['error'] or ''}" for j in jobs) or 'Nenhuma busca.')
+            progress = self.db.search_progress()
+            # Ten jobs can exceed Telegram's message limit with long names.
+            for offset in range(0, len(progress), 4000):
+                await self.send(update, progress[offset:offset + 4000])
             return
         if command in ('start', 'help'):
             await self.send(update, '/adicionar /remover /listar /preco /historico /menorpreco\n/adicionarcanal /removercanal /listarcanais\n/buscas /cancelar\nUse os comandos em conversa privada.')

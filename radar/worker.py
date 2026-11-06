@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime
 from telethon.errors import FloodWaitError
-from .core import UTC, matches, parse_offer
+from .core import UTC, matches, parse_offer, search_term, now
 
 log = logging.getLogger(__name__)
 
@@ -17,9 +17,19 @@ class Worker:
         self.admin, self.delay = admin, delay
 
     async def scan(self, scan, product):
-        # Percorre da mais recente à mais antiga e salva o cursor
-        # inclusive para mensagens sem ofertas.
-        kwargs = {'offset_id': scan['cursor']} if scan['cursor'] else {'offset_date': datetime.fromtimestamp(scan['end'], UTC)}
+        query = search_term(product['name'])
+        if scan['search_query'] != query:
+            # Old cursors belong to a different iterator. Replay only unfinished
+            # scans; offer keys deduplicate messages already stored.
+            self.db.execute('UPDATE scans SET cursor=0,search_query=?,examined=0,found=0,last_date=NULL WHERE id=?', (query, scan['id']))
+            scan = self.db.conn.execute('SELECT * FROM scans WHERE id=?', (scan['id'],)).fetchone()
+        # Always bound search by date, including after a restart. Server-side
+        # search returns candidates; the existing local matcher decides offers.
+        kwargs = {'offset_date': datetime.fromtimestamp(scan['end'], UTC)}
+        if scan['cursor']:
+            kwargs['offset_id'] = scan['cursor']
+        if query:
+            kwargs['search'] = query
         count = 0
         async for msg in self.client.iter_messages(scan['channel'], **kwargs):
             status = self.db.conn.execute('SELECT status FROM jobs WHERE id=?', (scan['job'],)).fetchone()[0]
@@ -30,10 +40,13 @@ class Worker:
                 break
             if stamp < scan['end']:
                 parsed = parse_offer(msg.raw_text or '') if matches(product['name'], msg.raw_text or '') else None
+                inserted = False
                 if parsed:
-                    self.db.record(product, scan['channel'], msg.id, stamp, parsed, message_url(scan['channel'], msg.id))
+                    inserted = self.db.record(product, scan['channel'], msg.id, stamp, parsed, message_url(scan['channel'], msg.id))
+            else:
+                inserted = False
             # Offers commit before cursor: restart can repeat an insert, never skip it.
-            self.db.execute('UPDATE scans SET cursor=? WHERE id=?', (msg.id, scan['id']))
+            self.db.execute('UPDATE scans SET cursor=?,examined=examined+1,found=found+?,last_date=? WHERE id=?', (msg.id, int(bool(inserted)), stamp, scan['id']))
             count += 1
             if count % 50 == 0:
                 await asyncio.sleep(self.delay)
@@ -74,6 +87,8 @@ class Worker:
                     await asyncio.sleep(1)
             except FloodWaitError as exc:
                 log.warning('Telegram limitou a importação; aguardando %s segundos', exc.seconds)
+                resume = datetime.fromtimestamp(now() + exc.seconds + 1, UTC).strftime('%d/%m %H:%M:%S UTC')
+                self.db.execute("UPDATE jobs SET error=? WHERE status='running'", (f'Telegram limitou as consultas. Retomada prevista: {resume}.',))
                 await asyncio.sleep(exc.seconds + 1)
             except asyncio.CancelledError:
                 raise
