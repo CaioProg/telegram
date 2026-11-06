@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "radar-promocoes"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["Telethon>=1.36,<2", "python-telegram-bot>=21,<23"]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2"]
+
+[project.scripts]
+radar = "radar.app:main"
+
+[tool.setuptools.packages.find]
+include = ["radar*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
