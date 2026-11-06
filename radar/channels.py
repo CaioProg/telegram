@@ -4,6 +4,7 @@ import re
 
 from telethon import utils
 from telethon.errors import FloodWaitError, RPCError, UserNotParticipantError
+from telethon.tl.types import Channel
 
 log = logging.getLogger(__name__)
 
@@ -25,8 +26,9 @@ class ChannelManager:
         username = channel_username(text)
         try:
             entity = await self.client.get_entity(username)
-            if not getattr(entity, 'broadcast', False) or not getattr(entity, 'username', None):
-                raise ValueError('Use um canal público de transmissão. Grupos, usuários e bots não são aceitos.')
+            if (not isinstance(entity, Channel) or not (entity.broadcast or entity.megagroup)
+                    or not entity.username):
+                raise ValueError('Use um canal público de transmissão ou supergrupo público. Grupos básicos, usuários e bots não são aceitos.')
             permissions = await self.client.get_permissions(entity, 'me')
             if permissions.has_left or permissions.is_banned:
                 raise UserNotParticipantError(request=None)

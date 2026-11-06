@@ -131,7 +131,7 @@ async def test_validation_errors_allow_retry(db):
     assert db.channel_names() == ['ofertas']
 
 
-async def test_rejects_groups_and_handles_flood_wait(db):
+async def test_rejects_basic_groups_and_handles_flood_wait(db):
     registry = manager(db)
     registry.client.get_entity.return_value = SimpleNamespace(broadcast=False)
     with pytest.raises(ValueError, match='Grupos'):
@@ -139,6 +139,54 @@ async def test_rejects_groups_and_handles_flood_wait(db):
     registry.client.get_entity.side_effect = FloodWaitError(request=None, capture=30)
     with pytest.raises(ValueError, match='30 segundos'):
         await registry.add('ofertas')
+    assert db.channels() == []
+
+
+async def test_public_supergroup_supports_registration_live_and_history(db):
+    registry = manager(db)
+    registry.client.get_entity.return_value = Channel(id=456, title='Grupo de ofertas', photo=None, date=None, broadcast=False, megagroup=True, username='CanalJMS_Descontos')
+    bot = Bot(db, 1, registry)
+    u = update('/adicionarcanal')
+    await bot.command(u, None)
+    u.message.text = '@CanalJMS_Descontos'
+    await bot.text(u, None)
+    assert db.channel_names() == ['canaljms_descontos']
+    assert not bot.sessions
+    assert db.conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0] == 0
+    p = next(p for p in db.products() if 'Edge' in p['name'])
+    event = SimpleNamespace(chat_id=-1000000000456, id=10, date=datetime.fromtimestamp(80, UTC), raw_text='Motorola Edge 70 Pro R$ 100,00')
+    record_live(db, event)
+    assert db.conn.execute('SELECT channel FROM offers').fetchone()[0] == 'canaljms_descontos'
+
+    class Client:
+        async def iter_messages(self, channel, **kwargs):
+            assert channel == 'canaljms_descontos'
+            yield SimpleNamespace(id=9, date=datetime.fromtimestamp(70, UTC), raw_text=event.raw_text)
+
+    db.enqueue(p['id'], 30, 100, db.channel_names())
+    await Worker(db, Client(), AsyncMock(), 1, delay=0).step()
+    assert db.conn.execute('SELECT COUNT(*) FROM offers').fetchone()[0] == 2
+    assert db.conn.execute('SELECT status FROM jobs').fetchone()[0] == 'done'
+
+
+@pytest.mark.parametrize('username,left,banned', [(None, False, False), ('ofertas', True, False), ('ofertas', False, True)])
+async def test_supergroup_requires_public_username_and_membership(db, username, left, banned):
+    registry = manager(db)
+    registry.client.get_entity.return_value = Channel(id=456, title='Grupo', photo=None, date=None, megagroup=True, username=username)
+    registry.client.get_permissions.return_value = SimpleNamespace(has_left=left, is_banned=banned)
+    with pytest.raises(ValueError):
+        await registry.add('ofertas')
+    assert db.channels() == []
+
+
+@pytest.mark.parametrize('entity_type', ['user', 'bot'])
+async def test_users_and_bots_are_rejected(db, entity_type):
+    from telethon.tl.types import User
+    registry = manager(db)
+    registry.client.get_entity.return_value = User(id=456, username='ofertas', bot=entity_type == 'bot')
+    with pytest.raises(ValueError, match='usuários e bots'):
+        await registry.add('ofertas')
+    registry.client.get_permissions.assert_not_awaited()
     assert db.channels() == []
 
 

@@ -48,7 +48,7 @@ Períodos: 7, 30, 90 dias, 6 meses, 1 ano e personalizado (`DD/MM/AAAA DD/MM/AAA
 
 ## Canais pelo bot
 
-Na conversa privada com o bot, use `/adicionarcanal` e envie `@username` ou `https://t.me/username`. O cadastro valida que é um canal público de transmissão e que a conta leitora participa dele. Grupos, usuários, bots, links de mensagens e convites privados não são aceitos. Entre no canal pelo Telegram da conta leitora antes de tentar cadastrar; o bot não entra nem sai de canais automaticamente.
+Na conversa privada com o bot, use `/adicionarcanal` e envie `@username` ou `https://t.me/username`. O cadastro aceita canais públicos de transmissão e supergrupos públicos, desde que a conta leitora participe deles. Grupos básicos, usuários, bots, links de mensagens e convites privados não são aceitos. Entre no canal ou supergrupo pelo Telegram da conta leitora antes de tentar cadastrar; o bot não entra nem sai deles automaticamente. Nos supergrupos, mensagens dos participantes também podem gerar ofertas quando correspondem ao produto e incluem preço.
 
 A mudança passa a valer imediatamente. Adicionar não importa mensagens antigas: use `/historico`, selecione o produto e o período para autorizar uma importação. Remover pede confirmação, desativa novas coletas e cancela as tarefas que ainda consultariam aquele canal. Ofertas e coberturas já armazenadas permanecem disponíveis; reativar o mesmo canal reutiliza esse histórico. Relatórios preservam também ofertas de canais removidos.
 
