@@ -66,6 +66,10 @@ class DB:
         self.conn.executescript('''
         PRAGMA journal_mode=WAL;
         PRAGMA foreign_keys=ON;
+        CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS channels(
+          id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL COLLATE NOCASE,
+          peer_id INTEGER UNIQUE, title TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS products(
           id INTEGER PRIMARY KEY, name TEXT NOT NULL, normalized TEXT UNIQUE NOT NULL,
           target INTEGER, active INTEGER NOT NULL DEFAULT 1);
@@ -105,6 +109,57 @@ class DB:
     def product(self, pid):
         return self.conn.execute('SELECT * FROM products WHERE id=? AND active=1', (pid,)).fetchone()
 
+    def channels(self):
+        return self.conn.execute('SELECT * FROM channels WHERE active=1 ORDER BY username').fetchall()
+
+    def channel_names(self):
+        return [row['username'] for row in self.channels()]
+
+    def channel(self, cid):
+        return self.conn.execute('SELECT * FROM channels WHERE id=? AND active=1', (cid,)).fetchone()
+
+    def channel_for_peer(self, peer_id):
+        return self.conn.execute('SELECT * FROM channels WHERE peer_id=? AND active=1', (peer_id,)).fetchone()
+
+    def channel_active(self, username):
+        return self.conn.execute('SELECT 1 FROM channels WHERE username=? AND active=1', (username,)).fetchone() is not None
+
+    def _rename_channel_history(self, old, new):
+        self.conn.execute('UPDATE OR IGNORE offers SET channel=? WHERE channel=?', (new, old))
+        self.conn.execute('DELETE FROM offers WHERE channel=?', (old,))
+        self.conn.execute("UPDATE offers SET url='https://t.me/' || ? || '/' || message WHERE channel=?", (new, new))
+        self.conn.execute('UPDATE scans SET channel=? WHERE channel=?', (new, old))
+        self.conn.execute('UPDATE coverage SET channel=? WHERE channel=?', (new, old))
+
+    def add_channel(self, username, peer_id, title):
+        with self.conn:
+            owner = self.conn.execute('SELECT peer_id FROM channels WHERE username=?', (username,)).fetchone()
+            if owner and owner['peer_id'] != peer_id:
+                raise ValueError('Este username agora pertence a outro canal. Use outro canal para preservar o histórico existente.')
+            existing = self.conn.execute('SELECT * FROM channels WHERE peer_id=?', (peer_id,)).fetchone()
+            if existing and existing['username'] != username:
+                old = existing['username']
+                self.conn.execute("UPDATE jobs SET status='cancelled' WHERE status IN ('pending','running') AND id IN (SELECT job FROM scans WHERE channel=? AND done=0)", (old,))
+                self._rename_channel_history(old, username)
+                self.conn.execute('UPDATE channels SET username=? WHERE id=?', (username, existing['id']))
+            # Legacy env accepted mixed-case usernames. Normalize their saved keys
+            # before recording new offers to preserve message deduplication.
+            variants = self.conn.execute('SELECT channel FROM (SELECT channel FROM offers UNION SELECT channel FROM scans UNION SELECT channel FROM coverage) WHERE lower(channel)=? AND channel<>?', (username, username)).fetchall()
+            for variant in variants:
+                self._rename_channel_history(variant[0], username)
+            self.conn.execute('INSERT INTO channels(username,peer_id,title) VALUES (?,?,?) ON CONFLICT(username) DO UPDATE SET title=excluded.title, active=1', (username, peer_id, title))
+            return self.conn.execute('SELECT id FROM channels WHERE username=?', (username,)).fetchone()[0]
+
+    def remove_channel(self, cid):
+        channel = self.channel(cid)
+        if channel is None:
+            return False
+        with self.conn:
+            self.conn.execute('UPDATE channels SET active=0 WHERE id=?', (cid,))
+            # Cancel affected jobs as a whole; retain completed coverage and offers.
+            self.conn.execute("UPDATE jobs SET status='cancelled' WHERE status IN ('pending','running') AND id IN (SELECT job FROM scans WHERE channel=? AND done=0)", (channel['username'],))
+        return True
+
     def missing(self, pid, channel, start, end):
         ranges = self.conn.execute('SELECT start,end FROM coverage WHERE product=? AND channel=? AND end>? AND start<? ORDER BY start', (pid, channel, start, end))
         cursor = start
@@ -140,6 +195,8 @@ class DB:
         rows = self.conn.execute('SELECT * FROM offers WHERE product=? AND date>=? AND date<? ORDER BY date,message', (pid, start, end)).fetchall()
         incomplete = any(self.missing(pid, c, start, end) for c in channels)
         state = 'Histórico incompleto: há períodos ainda não processados.' if incomplete else 'Histórico processado para os canais configurados.'
+        if not channels:
+            state = 'Nenhum canal ativo. Dados já armazenados foram preservados; cadastre canais com /adicionarcanal.'
         if not rows:
             return f'Nenhuma oferta encontrada no período.\n{state}'
         best = min(rows, key=lambda r: r['price'])

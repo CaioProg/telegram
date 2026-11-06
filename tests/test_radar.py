@@ -12,6 +12,7 @@ from radar.app import Bot
 @pytest.fixture
 def db(tmp_path):
     database = DB(tmp_path / 'radar.db')
+    database.add_channel('canal', -1001234567890, 'Canal de testes')
     yield database
     database.conn.close()
 
@@ -81,7 +82,7 @@ async def test_resume_and_cached_import(db):
     p = next(p for p in db.products() if 'Edge' in p['name'])
     job = db.enqueue(p['id'], 30, 100, ['canal'])
     client = FakeClient(fail=True)
-    worker = Worker(db, client, AsyncMock(), 1, ['canal'], delay=0)
+    worker = Worker(db, client, AsyncMock(), 1, delay=0)
     with pytest.raises(RuntimeError):
         await worker.step()
     assert db.conn.execute('SELECT cursor FROM scans').fetchone()[0] == 3
@@ -99,12 +100,12 @@ async def test_cancelled_job_not_scanned(db):
     db.enqueue(p['id'], 30, 100, ['canal'])
     db.execute("UPDATE jobs SET status='cancelled'")
     client = FakeClient()
-    assert not await Worker(db, client, AsyncMock(), 1, ['canal']).step()
+    assert not await Worker(db, client, AsyncMock(), 1).step()
     assert not client.offsets
 
 
 async def test_unauthorized_command_and_callback(db):
-    bot = Bot(db, 1, ['canal'])
+    bot = Bot(db, 1, None)
     message = SimpleNamespace(text='/adicionar', reply_text=AsyncMock())
     update = SimpleNamespace(effective_user=SimpleNamespace(id=2), effective_chat=SimpleNamespace(type='private'), message=message, effective_message=message, callback_query=SimpleNamespace(answer=AsyncMock()))
     await bot.command(update, None)
@@ -115,7 +116,7 @@ async def test_unauthorized_command_and_callback(db):
 
 
 async def test_add_requires_period_before_import(db):
-    bot = Bot(db, 1, ['canal'])
+    bot = Bot(db, 1, None)
     message = SimpleNamespace(text='/adicionar', reply_text=AsyncMock())
     update = SimpleNamespace(effective_user=SimpleNamespace(id=1), effective_chat=SimpleNamespace(type='private'), message=message, effective_message=message)
     await bot.command(update, None)

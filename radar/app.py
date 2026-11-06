@@ -13,13 +13,14 @@ from telethon import TelegramClient, events
 from .core import DB, UTC, matches, money, now, parse_money, parse_offer, period_start
 from .worker import Worker, message_url
 from .health import HEARTBEAT
+from .channels import ChannelManager
 
 PERIODS = [('7 dias', '7'), ('30 dias', '30'), ('90 dias', '90'), ('6 meses', '6m'), ('1 ano', '1y'), ('Personalizado', 'custom')]
 
 
 class Bot:
-    def __init__(self, db, admin, channels):
-        self.db, self.admin, self.channels = db, admin, channels
+    def __init__(self, db, admin, channel_manager):
+        self.db, self.admin, self.channel_manager = db, admin, channel_manager
         self.sessions = {}
 
     def allowed(self, update):
@@ -44,7 +45,23 @@ class Bot:
             await self.send(update, '\n'.join(f"#{j['id']}: {j['status']} {j['error'] or ''}" for j in jobs) or 'Nenhuma busca.')
             return
         if command in ('start', 'help'):
-            await self.send(update, '/adicionar /remover /listar /preco /historico /menorpreco\n/buscas /cancelar\nUse os comandos em conversa privada.')
+            await self.send(update, '/adicionar /remover /listar /preco /historico /menorpreco\n/adicionarcanal /removercanal /listarcanais\n/buscas /cancelar\nUse os comandos em conversa privada.')
+            return
+        if command == 'listarcanais':
+            channels = self.db.channels()
+            await self.send(update, '\n'.join(f"@{c['username']} — {c['title']}" for c in channels) or 'Nenhum canal cadastrado. Use /adicionarcanal.')
+            return
+        if command == 'adicionarcanal':
+            self.sessions[self.admin] = {'action': command, 'stage': 'channel_name'}
+            await self.send(update, 'Envie o @username ou link público do canal. A conta leitora precisa participar dele. /cancelar para sair.')
+            return
+        if command == 'removercanal':
+            channels = self.db.channels()
+            if not channels:
+                await self.send(update, 'Nenhum canal cadastrado. Use /adicionarcanal.')
+                return
+            self.sessions[self.admin] = {'action': command, 'stage': 'channel_select'}
+            await self.send(update, 'Qual canal deseja remover?', [[Button('@' + c['username'], callback_data=f"channel:{c['id']}")] for c in channels])
             return
         if command == 'listar':
             await self.send(update, '\n'.join(f"{p['name']} — alvo: {money(p['target']) if p['target'] else 'não definido'}" for p in self.db.products()) or 'Nenhum produto monitorado.')
@@ -62,8 +79,8 @@ class Bot:
 
     async def query(self, update, session, start, end):
         pid = session['product']
-        await self.send(update, self.db.report(pid, start, end, self.channels))
-        job = self.db.enqueue(pid, start, end, self.channels)
+        await self.send(update, self.db.report(pid, start, end, self.db.channel_names()))
+        job = self.db.enqueue(pid, start, end, self.db.channel_names())
         if job:
             await self.send(update, f'Busca #{job} iniciada em segundo plano apenas para períodos ausentes. O resultado chegará aqui. /cancelar interrompe as buscas; /buscas mostra o progresso.')
         self.sessions.pop(self.admin, None)
@@ -82,7 +99,22 @@ class Bot:
             await self.send(update, 'Este botão expirou. Use os botões da conversa atual.')
             return
         data = update.callback_query.data
-        if data.startswith('product:') and session['stage'] == 'product':
+        if data.startswith('channel:') and session['stage'] == 'channel_select':
+            cid = int(data.split(':')[1])
+            channel = self.db.channel(cid)
+            if not channel:
+                await self.send(update, 'Canal não está mais ativo.')
+                return
+            session.update(stage='channel_confirm', channel=cid)
+            await self.send(update, f"Remover @{channel['username']} do monitoramento? Buscas desse canal serão canceladas e o histórico salvo será preservado.", [[Button('Remover', callback_data='channel_remove:yes'), Button('Manter', callback_data='channel_remove:no')]])
+        elif data.startswith('channel_remove:') and session['stage'] == 'channel_confirm':
+            if data == 'channel_remove:yes':
+                self.db.remove_channel(session['channel'])
+                await self.send(update, 'Canal removido. Monitoramento atualizado sem reiniciar. Histórico preservado.')
+            else:
+                await self.send(update, 'Canal mantido.')
+            self.sessions.pop(self.admin, None)
+        elif data.startswith('product:') and session['stage'] == 'product':
             pid = int(data.split(':')[1])
             if not self.db.product(pid):
                 await self.send(update, 'Produto não está mais ativo.')
@@ -126,7 +158,20 @@ class Bot:
             return
         text = update.message.text.strip()
         try:
-            if session['stage'] == 'name':
+            if session['stage'] == 'channel_name':
+                # Telegram lookups await network I/O. Cancellation or a new command
+                # during validation must not persist a stale channel request.
+                session['stage'] = 'channel_validating'
+                try:
+                    cid = await self.channel_manager.add(text, current=lambda: self.sessions.get(self.admin) is session)
+                except ValueError:
+                    if self.sessions.get(self.admin) is session:
+                        session['stage'] = 'channel_name'
+                    raise
+                if cid is not None:
+                    self.sessions.pop(self.admin, None)
+                    await self.send(update, 'Canal cadastrado. Monitoramento ativo sem reiniciar. Nenhum histórico foi importado; use /historico e escolha o período desejado.')
+            elif session['stage'] == 'name':
                 session['product'] = self.db.add(text)
                 session['stage'] = 'import'
                 await self.send(update, 'Produto cadastrado, sem exigir preço-alvo. Deseja importar ofertas anteriores?', [[Button('Sim', callback_data='import:yes'), Button('Não', callback_data='import:no')]])
@@ -146,13 +191,23 @@ class Bot:
             await self.send(update, str(exc))
 
 
+def record_live(db, event):
+    registered = db.channel_for_peer(event.chat_id)
+    if not registered:
+        return
+    channel = registered['username']
+    text = event.raw_text or ''
+    for product in db.products():
+        if matches(product['name'], text):
+            parsed = parse_offer(text)
+            if parsed:
+                db.record(product, channel, event.id, int(event.date.timestamp()), parsed, message_url(channel, event.id), live=True)
+
+
 async def run():
-    required = ['TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_ADMIN_ID', 'TELEGRAM_CHANNELS']
+    required = ['TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_ADMIN_ID']
     if any(not os.environ.get(key) for key in required):
         raise SystemExit('Configure: ' + ', '.join(required))
-    channels = list(dict.fromkeys(c.strip().lstrip('@') for c in os.environ['TELEGRAM_CHANNELS'].split(',') if c.strip()))
-    if not channels or any(not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{3,}', c) for c in channels):
-        raise SystemExit('TELEGRAM_CHANNELS deve conter usernames de canais públicos separados por vírgula.')
     admin = int(os.environ['TELEGRAM_ADMIN_ID'])
     db_path = os.environ.get('RADAR_DB', 'data/radar.sqlite3')
     session_path = os.environ.get('TELEGRAM_SESSION', 'data/telegram')
@@ -160,37 +215,29 @@ async def run():
     Path(session_path).parent.mkdir(parents=True, exist_ok=True)
     db = DB(db_path)
     app = Application.builder().token(os.environ['TELEGRAM_BOT_TOKEN']).build()
-    controller = Bot(db, admin, channels)
-    app.add_handler(CommandHandler(['start', 'help', 'adicionar', 'remover', 'listar', 'preco', 'historico', 'menorpreco', 'cancelar', 'buscas'], controller.command))
-    app.add_handler(CallbackQueryHandler(controller.callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, controller.text))
     client = TelegramClient(session_path, int(os.environ['TELEGRAM_API_ID']), os.environ['TELEGRAM_API_HASH'], flood_sleep_threshold=0)
     await client.connect()
     if not await client.is_user_authorized():
         await client.disconnect()
         db.conn.close()
         raise SystemExit('Sessão Telegram ausente ou expirada. Execute python -m radar.login antes de iniciar o serviço.')
-    # Resolve todos os canais antes de instalar o handler; falha explícita se inacessível.
-    entities = [await client.get_entity(channel) for channel in channels]
-    channel_names = {entity.id: channel for entity, channel in zip(entities, channels)}
+    channel_manager = ChannelManager(db, client)
+    await channel_manager.bootstrap(os.environ.get('TELEGRAM_CHANNELS', ''))
+    controller = Bot(db, admin, channel_manager)
+    app.add_handler(CommandHandler(['start', 'help', 'adicionar', 'remover', 'listar', 'preco', 'historico', 'menorpreco', 'cancelar', 'buscas', 'adicionarcanal', 'removercanal', 'listarcanais'], controller.command))
+    app.add_handler(CallbackQueryHandler(controller.callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, controller.text))
 
     async def live(event):
-        channel = channel_names.get(event.chat.id)
-        if not channel:
-            return
-        for product in db.products():
-            if matches(product['name'], event.raw_text):
-                parsed = parse_offer(event.raw_text)
-                if parsed:
-                    db.record(product, channel, event.id, int(event.date.timestamp()), parsed, message_url(channel, event.id), live=True)
+        record_live(db, event)
 
-    client.add_event_handler(live, events.NewMessage(chats=entities))
+    client.add_event_handler(live, events.NewMessage())
     tasks = []
     try:
         async with app:
             await app.start()
             await app.updater.start_polling()
-            worker = Worker(db, client, app.bot, admin, channels)
+            worker = Worker(db, client, app.bot, admin)
             tasks = [asyncio.create_task(worker.run()), asyncio.create_task(worker.deliver())]
 
             async def heartbeat():

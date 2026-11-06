@@ -46,7 +46,7 @@ chmod 600 shared/.env
 nano shared/.env
 ```
 
-Preencha API ID, API Hash, **novo** token do bot, ID do administrador e canais. As duas variáveis de caminho são sobrescritas pelo Compose, apontando para o volume persistente. Não envie esse arquivo ao GitHub. O token compartilhado anteriormente precisa ser substituído no BotFather.
+Preencha API ID, API Hash, **novo** token do bot e ID do administrador. Os canais são cadastrados depois pelo bot com `/adicionarcanal`; `TELEGRAM_CHANNELS` é opcional e serve apenas para a migração inicial de instalações antigas. As duas variáveis de caminho são sobrescritas pelo Compose, apontando para o volume persistente. Não envie esse arquivo ao GitHub. O token compartilhado anteriormente precisa ser substituído no BotFather.
 
 ```sh
 cd "$HOME/radar-promocoes/bootstrap"

@@ -12,9 +12,9 @@ def message_url(channel, message):
 
 
 class Worker:
-    def __init__(self, db, client, bot, admin, channels, delay=0.4):
+    def __init__(self, db, client, bot, admin, delay=0.4):
         self.db, self.client, self.bot = db, client, bot
-        self.admin, self.channels, self.delay = admin, channels, delay
+        self.admin, self.delay = admin, delay
 
     async def scan(self, scan, product):
         # Percorre da mais recente à mais antiga e salva o cursor
@@ -23,7 +23,7 @@ class Worker:
         count = 0
         async for msg in self.client.iter_messages(scan['channel'], **kwargs):
             status = self.db.conn.execute('SELECT status FROM jobs WHERE id=?', (scan['job'],)).fetchone()[0]
-            if status == 'cancelled':
+            if status == 'cancelled' or not self.db.channel_active(scan['channel']):
                 return
             stamp = int(msg.date.timestamp())
             if stamp < scan['start']:
@@ -37,6 +37,9 @@ class Worker:
             count += 1
             if count % 50 == 0:
                 await asyncio.sleep(self.delay)
+        status = self.db.conn.execute('SELECT status FROM jobs WHERE id=?', (scan['job'],)).fetchone()[0]
+        if status == 'cancelled' or not self.db.channel_active(scan['channel']):
+            return
         with self.db.conn:
             self.db.conn.execute('UPDATE scans SET done=1 WHERE id=?', (scan['id'],))
             self.db.conn.execute('INSERT INTO coverage VALUES (?,?,?,?)', (product['id'], scan['channel'], scan['start'], scan['end']))
@@ -52,6 +55,9 @@ class Worker:
         self.db.execute("UPDATE jobs SET status='running',error=NULL WHERE id=?", (job['id'],))
         scans = self.db.conn.execute('SELECT * FROM scans WHERE job=? AND done=0', (job['id'],)).fetchall()
         for scan in scans:
+            if not self.db.channel_active(scan['channel']):
+                self.db.execute("UPDATE jobs SET status='cancelled' WHERE id=?", (job['id'],))
+                return True
             if not self.db.missing(product['id'], scan['channel'], scan['start'], scan['end']):
                 self.db.execute('UPDATE scans SET done=1 WHERE id=?', (scan['id'],))
                 continue
@@ -83,7 +89,8 @@ class Worker:
                     await self.bot.send_message(self.admin, row['text'])
                     self.db.execute('UPDATE outbox SET sent=1 WHERE id=?', (row['id'],))
                 for job in self.db.conn.execute("SELECT * FROM jobs WHERE status IN ('done','cancelled') AND notified=0").fetchall():
-                    report = self.db.report(job['product'], job['start'], job['end'], self.channels)
+                    requested = [r[0] for r in self.db.conn.execute('SELECT DISTINCT channel FROM scans WHERE job=?', (job['id'],))]
+                    report = self.db.report(job['product'], job['start'], job['end'], sorted(set(requested + self.db.channel_names())))
                     await self.bot.send_message(self.admin, f"Busca #{job['id']}: {job['status']}\n{report}")
                     self.db.execute('UPDATE jobs SET notified=1 WHERE id=?', (job['id'],))
             except asyncio.CancelledError:
